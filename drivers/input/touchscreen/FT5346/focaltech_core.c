@@ -49,6 +49,10 @@
 #define FTS_SUSPEND_LEVEL 1
 #endif
 
+#ifdef CONFIG_WAKE_GESTURES
+#include <linux/wake_gestures.h>
+#endif
+
 #if LENOVO_CHARGER_DETECT
 #include <linux/power_supply.h>
 int power_supply_get_battery_charge_state(struct power_supply *psy);
@@ -144,6 +148,12 @@ struct input_dev *fts_input_dev;
 
 static unsigned int buf_count_add;
 static unsigned int buf_count_neg;
+
+#ifdef CONFIG_WAKE_GESTURES
+bool scr_suspended_ft(void) {
+	return fts_ts->suspended;
+}
+#endif
 
 #if LENOVO_DOUBLE_CLICK
 extern int enable_double_click;
@@ -1043,6 +1053,12 @@ static int fts_ts_stop(struct device *dev)
 		input_mt_report_slot_state(data->input_dev, MT_TOOL_FINGER, 0);
 		pr_info("F[%d]: rel\n", i);
 	}
+
+#ifdef CONFIG_WAKE_GESTURES
+		if (data->suspended)
+			x += 5000;
+#endif
+
 	input_mt_report_pointer_emulation(data->input_dev, false);
 	input_sync(data->input_dev);
 
@@ -1152,6 +1168,20 @@ int fts_ts_suspend(struct device *dev)
 
 	return 0;
 #endif
+
+#ifdef CONFIG_WAKE_GESTURES
+	if (device_may_wakeup(dev) && (s2w_switch || dt2w_switch)) {
+		fts_write_reg(data->client, 0xD0, 1);
+		err = enable_irq_wake(data->client->irq);
+		if (err)
+			dev_err(&data->client->dev,
+				"%s: set_irq_wake failed\n", __func__);
+		data->suspended = true;
+
+		return err;
+	}
+#endif
+
 #if LENOVO_DOUBLE_CLICK
 	if (enable_double_click) {
 		int i;
@@ -1232,6 +1262,36 @@ int fts_ts_resume(struct device *dev)
 		dev_dbg(dev, "Already in awake state\n");
 		return 0;
 	}
+
+#ifdef CONFIG_WAKE_GESTURES
+	if (device_may_wakeup(dev) && (s2w_switch || dt2w_switch)) {
+		fts_write_reg(data->client, 0xD0, 0);
+
+		for (i = 0; i < data->pdata->num_max_touches; i++) {
+			input_mt_slot(data->input_dev, i);
+			input_mt_report_slot_state(data->input_dev, MT_TOOL_FINGER, 0);
+		}
+		input_mt_report_pointer_emulation(data->input_dev, false);
+		input_sync(data->input_dev);
+
+		err = disable_irq_wake(data->client->irq);
+		if (err)
+			dev_err(dev, "%s: disable_irq_wake failed\n",
+				__func__);
+		data->suspended = false;
+
+		if (dt2w_switch_changed) {
+			dt2w_switch = dt2w_switch_temp;
+			dt2w_switch_changed = false;
+		}
+		if (s2w_switch_changed) {
+			s2w_switch = s2w_switch_temp;
+			s2w_switch_changed = false;
+		}
+
+		return err;
+	}
+#endif
 
 #if LENOVO_DOUBLE_CLICK
 	if (enable_double_click) {
@@ -1911,6 +1971,9 @@ static int fts_ts_probe(struct i2c_client *client, const struct i2c_device_id *i
 	__set_bit(EV_ABS, input_dev->evbit);
 	__set_bit(BTN_TOUCH, input_dev->keybit);
 	__set_bit(INPUT_PROP_DIRECT, input_dev->propbit);
+#ifdef CONFIG_WAKE_GESTURES
+	device_init_wakeup(&client->dev, 1);
+#endif
 #if LENOVO_DOUBLE_CLICK
 	__set_bit(USR_TP_DOUBLE_CLICK,input_dev->keybit);
 #endif
